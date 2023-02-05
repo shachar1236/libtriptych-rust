@@ -3,6 +3,7 @@
 use curve25519_dalek::ristretto::{RistrettoPoint};
 use curve25519_dalek::scalar::Scalar;
 use curve25519_dalek::traits::Identity;
+use libc::size_t;
 
 use crate::util;
 use crate::Errors::{self, TriptychError};
@@ -12,6 +13,9 @@ use sha2::Sha512;
 // use serde::{Serialize, Deserialize};
 
 use std::mem::size_of_val;
+use std::ptr::drop_in_place;
+use std::alloc::Layout;
+use std::alloc::dealloc;
 
 // #[derive(Clone, Debug, Serialize, Deserialize)]
 #[derive(Clone, Debug)]
@@ -273,9 +277,11 @@ pub fn DeserializePublicKey(bytes: Vec<u8>) -> Result<RistrettoPoint, Box<bincod
     return bincode::deserialize(&bytes[..]);
 }
 
-pub fn SerializePrivateKey(sc: Scalar) ->  [u8; 32] {
+const PRIVATE_KEY_SIZE:usize = 32;
+
+pub fn SerializePrivateKey(sc: Scalar) ->  [u8; PRIVATE_KEY_SIZE] {
     let encoded = sc.to_bytes();
-    return  encoded;
+    return encoded;
 }
 
 pub fn DeserializePrivateKey(bytes: [u8; 32]) ->  Option<Scalar> {
@@ -289,6 +295,84 @@ pub fn SerializePublicKeysList(R: &[RistrettoPoint]) -> Result<Vec<u8>, Box<binc
 
 pub fn DeserializePublicKeysList(bytes: Vec<u8>) -> Result<Vec<RistrettoPoint>, Box<bincode::ErrorKind>> {
     return  bincode::deserialize(&bytes[..]);
+}
+
+#[no_mangle]
+pub extern "C" fn FreeVector(ptr: *mut u8, len: size_t) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe {
+        Vec::from_raw_parts(ptr, len, len);
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn FreePublicKey(ptr: *mut u8, len: size_t) {
+    FreeVector(ptr, len);
+}
+
+#[no_mangle]
+pub extern "C" fn FreeSlice(ptr: *mut u8, len: size_t) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe {
+        std::slice::from_raw_parts(ptr, len);
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn FreePrivateKey(ptr: *mut u8) {
+    FreeSlice(ptr, PRIVATE_KEY_SIZE);
+}
+
+#[no_mangle]
+pub extern "C" fn GeneratePrivateKey() -> *mut u8 {
+    let mut rng = rand::thread_rng();
+    let r = Scalar::random(&mut rng);
+
+    let mut ser= SerializePrivateKey(r);
+    
+    println!("priv key rust:{:?}", ser);
+
+    // prevents deallocation in rust
+    std::mem::forget(ser);
+    
+    return ser.as_mut_ptr();
+}
+
+#[no_mangle]
+pub extern "C" fn GeneratePublicKeyFromPrivateKey(private_key_ptr: *mut u8, recive_len: *mut size_t) -> *mut u8 {
+    let private_key: &[u8; PRIVATE_KEY_SIZE];
+    unsafe {
+        // bad code should not user unwrap!!!
+        private_key = std::slice::from_raw_parts(private_key_ptr, PRIVATE_KEY_SIZE).try_into().unwrap();
+    }
+    // bad code. should check if good before unwraaping
+    let r = DeserializePrivateKey(*private_key).unwrap();
+
+    let G = util::hash_to_point("G"); 
+    
+    let public_key: RistrettoPoint = r*G;
+    // bad code. should check if good before unwraaping
+    let mut ser = SerializePublicKey(&public_key).unwrap();
+    
+    println!("pub key rust: {:?}", ser);
+
+    unsafe {
+        *recive_len = ser.len();
+    }
+
+    ser.shrink_to_fit();
+
+    let ret = ser.as_mut_ptr();
+
+    // prevents deallocation in rust
+    std::mem::forget(ser);
+    std::mem::forget(private_key);
+
+    return ret;
 }
 
 pub fn Sign(x: &Scalar, M: &str, R: &[RistrettoPoint]) -> Signature {
@@ -338,6 +422,8 @@ mod triptych_test {
     use curve25519_dalek::traits::Identity;
     use crate::signature::triptych;
     use crate::util;
+
+    use super::{GeneratePrivateKey, FreeVector, GeneratePublicKeyFromPrivateKey, FreePublicKey, FreePrivateKey};
     
     #[test]
     pub fn test_base_signature(){
@@ -416,6 +502,17 @@ mod triptych_test {
         
         let decoded = bincode::deserialize(&encoded[..]).unwrap();
         assert_eq!(rp, decoded);
+    }
+
+    #[test]
+    pub fn test_wrapper_free() {
+        let priv_key = GeneratePrivateKey();
+        
+        let mut pub_key_len:libc::size_t = 0;
+        let pub_key = GeneratePublicKeyFromPrivateKey(priv_key, &mut pub_key_len);
+        
+        FreePublicKey(pub_key, pub_key_len);
+        FreePrivateKey(priv_key);
     }
 
 }
