@@ -8,6 +8,7 @@ use libc::size_t;
 use crate::util;
 use crate::Errors::{self, TriptychError};
 use std::convert::TryInto;
+use std::ffi::CStr;
 use sha2::Sha512;
 
 // use serde::{Serialize, Deserialize};
@@ -273,19 +274,19 @@ pub fn SerializePublicKey(R: &RistrettoPoint) -> Result<Vec<u8>, Box<bincode::Er
     return  encoded;
 }
 
-pub fn DeserializePublicKey(bytes: Vec<u8>) -> Result<RistrettoPoint, Box<bincode::ErrorKind>> {
+pub fn DeserializePublicKey(bytes: &[u8]) -> Result<RistrettoPoint, Box<bincode::ErrorKind>> {
     return bincode::deserialize(&bytes[..]);
 }
 
 const PRIVATE_KEY_SIZE:usize = 32;
 
-pub fn SerializePrivateKey(sc: Scalar) ->  [u8; PRIVATE_KEY_SIZE] {
+pub fn SerializePrivateKey(sc: &Scalar) ->  [u8; PRIVATE_KEY_SIZE] {
     let encoded = sc.to_bytes();
     return encoded;
 }
 
-pub fn DeserializePrivateKey(bytes: [u8; 32]) ->  Option<Scalar> {
-    return  Scalar::from_canonical_bytes(bytes).into();
+pub fn DeserializePrivateKey(bytes: &[u8; 32]) ->  Option<Scalar> {
+    return  Scalar::from_canonical_bytes(*bytes).into();
 }
 
 pub fn SerializePublicKeysList(R: &[RistrettoPoint]) -> Result<Vec<u8>, Box<bincode::ErrorKind>> {
@@ -297,6 +298,21 @@ pub fn DeserializePublicKeysList(bytes: Vec<u8>) -> Result<Vec<RistrettoPoint>, 
     return  bincode::deserialize(&bytes[..]);
 }
 
+fn PrivateKeyBytesFromPointer(ptr: *mut u8) -> Box<[u8; PRIVATE_KEY_SIZE]>  {
+    let private_key_bytes: Box<[u8; PRIVATE_KEY_SIZE]> = unsafe {
+        Box::from_raw(ptr as *mut [u8; PRIVATE_KEY_SIZE])
+    };
+    return private_key_bytes;
+}
+
+fn PublicKeyBytesFromPointer(ptr: *mut u8, len: size_t) -> Box<[u8]>  {
+    let ret = unsafe {
+        Vec::from_raw_parts(ptr, len, len)
+    };
+    return ret.into_boxed_slice();
+}
+
+
 #[no_mangle]
 pub extern "C" fn FreeVector(ptr: *mut u8, len: size_t) {
     if ptr.is_null() {
@@ -307,24 +323,46 @@ pub extern "C" fn FreeVector(ptr: *mut u8, len: size_t) {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn FreePublicKey(ptr: *mut u8, len: size_t) {
-    FreeVector(ptr, len);
+
+#[repr(C)]
+pub struct DynArray {
+    array: *mut u8,
+    length: libc::size_t,
 }
 
-#[no_mangle]
-pub extern "C" fn FreeSlice(ptr: *mut u8, len: size_t) {
-    if ptr.is_null() {
-        return;
+fn PublicKeysVectorFromPointer(public_keys_raw: *mut DynArray, public_keys_size: size_t) -> Vec<RistrettoPoint> {
+    // getting public keys
+    let public_keys_bytes = unsafe { std::slice::from_raw_parts(public_keys_raw, public_keys_size) };
+
+    // proccessing keys
+    let mut public_keys: Vec<RistrettoPoint> = Vec::with_capacity(public_keys_size);
+    for (i, key_bytes) in public_keys_bytes.iter().enumerate() {
+        let ser_pk = PublicKeyBytesFromPointer(key_bytes.array, key_bytes.length);
+        println!("Public key rust: {:?}", ser_pk);
+        // getting key
+        public_keys.push(DeserializePublicKey(&ser_pk).unwrap());
+        // prevents deallocation
+        let mut ser_pk = std::mem::ManuallyDrop::new(ser_pk);
     }
-    unsafe {
-        std::slice::from_raw_parts(ptr, len);
-    }
+    
+    // prevents deallocation
+    std::mem::forget(public_keys_bytes);
+    
+    return public_keys;
 }
 
 #[no_mangle]
 pub extern "C" fn FreePrivateKey(ptr: *mut u8) {
-    FreeSlice(ptr, PRIVATE_KEY_SIZE);
+    if ptr.is_null() {
+        return;
+    }
+    
+    PrivateKeyBytesFromPointer(ptr);
+}
+
+#[no_mangle]
+pub extern "C" fn FreePublicKey(ptr: *mut u8, len: size_t) {
+    FreeVector(ptr, len);
 }
 
 #[no_mangle]
@@ -332,47 +370,66 @@ pub extern "C" fn GeneratePrivateKey() -> *mut u8 {
     let mut rng = rand::thread_rng();
     let r = Scalar::random(&mut rng);
 
-    let mut ser= SerializePrivateKey(r);
+    let mut ser= SerializePrivateKey(&r);
     
-    println!("priv key rust:{:?}", ser);
+    // println!("priv key rust:{:?}", ser);
+    
+    let ser_vec = ser.to_vec();
 
-    // prevents deallocation in rust
-    std::mem::forget(ser);
-    
-    return ser.as_mut_ptr();
+    return Box::into_raw(ser_vec.into_boxed_slice()) as *mut u8;
 }
 
 #[no_mangle]
-pub extern "C" fn GeneratePublicKeyFromPrivateKey(private_key_ptr: *mut u8, recive_len: *mut size_t) -> *mut u8 {
-    let private_key: &[u8; PRIVATE_KEY_SIZE];
-    unsafe {
-        // bad code should not user unwrap!!!
-        private_key = std::slice::from_raw_parts(private_key_ptr, PRIVATE_KEY_SIZE).try_into().unwrap();
-    }
+pub extern "C" fn GeneratePublicKeyFromPrivateKey(private_key_ptr: *mut u8) -> DynArray {
+    let private_key = PrivateKeyBytesFromPointer(private_key_ptr);
     // bad code. should check if good before unwraaping
-    let r = DeserializePrivateKey(*private_key).unwrap();
+    let r = DeserializePrivateKey(&private_key).unwrap();
 
     let G = util::hash_to_point("G"); 
     
     let public_key: RistrettoPoint = r*G;
     // bad code. should check if good before unwraaping
-    let mut ser = SerializePublicKey(&public_key).unwrap();
+    let mut ser = SerializePublicKey(&public_key).unwrap().into_boxed_slice();
     
-    println!("pub key rust: {:?}", ser);
+    // println!("pub key rust: {:?}", ser);
 
-    unsafe {
-        *recive_len = ser.len();
-    }
-
-    ser.shrink_to_fit();
-
-    let ret = ser.as_mut_ptr();
+    let arr = DynArray{
+        length: ser.len(),
+        array: Box::into_raw(ser) as *mut u8,
+    };
 
     // prevents deallocation in rust
-    std::mem::forget(ser);
-    std::mem::forget(private_key);
+    Box::into_raw(private_key);
 
-    return ret;
+    return arr;
+}
+
+#[no_mangle]
+pub extern "C" fn RSSign(private_key_ptr: *mut u8, M: *const libc::c_char, public_keys_raw: *mut DynArray, public_keys_size: size_t) -> DynArray {
+    // getting private keys
+    let private_key_bytes = PrivateKeyBytesFromPointer(private_key_ptr);
+    
+    let private_key = DeserializePrivateKey(&private_key_bytes).unwrap();
+    
+    // getting m
+    let M_cstr = unsafe { CStr::from_ptr(M) };
+    let m = M_cstr.to_str().unwrap();
+    
+    let public_keys = PublicKeysVectorFromPointer(public_keys_raw, public_keys_size);
+    
+    // debugging
+    println!("Private key rust: {:?}", private_key_bytes);
+    println!("Message rust: {:?}", m);
+
+    // function end
+    // preventing deallocation
+    Box::into_raw(private_key_bytes);
+    
+    // calling function
+    let res = Sign(&private_key, m, &public_keys);
+    
+    // let res_bytes = SerializeSignature()
+    return DynArray{array: std::ptr::null_mut(), length: 0};
 }
 
 pub fn Sign(x: &Scalar, M: &str, R: &[RistrettoPoint]) -> Signature {
