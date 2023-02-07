@@ -65,7 +65,7 @@ pub fn GetSize(sgn: &Signature) ->  usize {
 }
 
 // This is the core Sigma Protocol being implemented, not the signature protocol
-fn base_prove(M: &[RistrettoPoint], l: &usize, r: &Scalar, m: &usize, message: &str) -> Signature{
+fn base_prove(M: &[RistrettoPoint], l: &usize, r: &Scalar, m: &usize, message: &[u8]) -> Signature{
     let n: usize = 2; // base of decomposition, Tryptich supports arbitary base, we prefer binary here
 
     let U = util::hash_to_point("U");
@@ -97,7 +97,7 @@ fn base_prove(M: &[RistrettoPoint], l: &usize, r: &Scalar, m: &usize, message: &
         transcript.extend_from_slice(entry.compress().as_bytes());
     }
 
-    transcript.extend_from_slice(message.as_bytes());
+    transcript.extend_from_slice(message);
     transcript.extend_from_slice(J.compress().as_bytes());
     transcript.extend_from_slice(A.compress().as_bytes());
     
@@ -178,7 +178,7 @@ fn base_prove(M: &[RistrettoPoint], l: &usize, r: &Scalar, m: &usize, message: &
 }
 
 // Verification of the base sigma protocol
-fn base_verify(M: &[RistrettoPoint], sgn: &Signature, m: &usize, message: &str) -> Result<(), Errors> {
+fn base_verify(M: &[RistrettoPoint], sgn: &Signature, m: &usize, message: &[u8]) -> Result<(), Errors> {
     
     let mut transcript: Vec<u8> = Vec::with_capacity(1000);
     let ellipticState = &sgn.a;
@@ -194,7 +194,7 @@ fn base_verify(M: &[RistrettoPoint], sgn: &Signature, m: &usize, message: &str) 
     for entry in M {
         transcript.extend_from_slice(entry.compress().as_bytes());
     }
-    transcript.extend_from_slice(message.as_bytes());
+    transcript.extend_from_slice(message);
     transcript.extend_from_slice(ellipticState.J.compress().as_bytes());
     transcript.extend_from_slice(ellipticState.A.compress().as_bytes());
     transcript.extend_from_slice(ellipticState.B.compress().as_bytes());
@@ -339,7 +339,6 @@ fn PublicKeysBytes2dVectorFromPointer(public_keys_raw: *mut DynArray, public_key
     let mut public_keys: Vec<RistrettoPoint> = Vec::with_capacity(public_keys_size);
     for key_bytes in public_keys_bytes.iter() {
         let ser_pk = BytesFromPointer(key_bytes.array, key_bytes.length);
-        println!("Public key rust: {:?}", ser_pk);
         // getting key
         public_keys.push(DeserializePublicKey(&ser_pk).unwrap());
         // prevents deallocation
@@ -428,22 +427,17 @@ pub extern "C" fn GeneratePublicKeyFromPrivateKey(private_key_ptr: *mut u8) -> D
 }
 
 #[no_mangle]
-pub extern "C" fn RSSign(private_key_ptr: *mut u8, M: *const libc::c_char, public_keys_raw: *mut DynArray, public_keys_size: size_t) -> DynArray {
+pub extern "C" fn RSSign(private_key_ptr: *mut u8, message_raw: *mut u8, message_size: libc::size_t, public_keys_raw: *mut DynArray, public_keys_size: size_t) -> DynArray {
     // getting private keys
     let private_key_bytes = PrivateKeyBytesFromPointer(private_key_ptr);
     
     let private_key = DeserializePrivateKey(&private_key_bytes).unwrap();
     
     // getting m
-    let M_cstr = unsafe { CStr::from_ptr(M) };
-    let m = M_cstr.to_str().unwrap();
+    let m = BytesFromPointer(message_raw, message_size);
     
     let public_keys = PublicKeysBytes2dVectorFromPointer(public_keys_raw, public_keys_size);
     
-    // debugging
-    println!("Private key rust: {:?}", private_key_bytes);
-    println!("Message rust: {:?}", m);
-
     // function end
     // preventing deallocation
     Box::into_raw(private_key_bytes);
@@ -455,20 +449,16 @@ pub extern "C" fn RSSign(private_key_ptr: *mut u8, M: *const libc::c_char, publi
     return DynArray{array: std::ptr::null_mut(), length: 0};
 }
 
-pub extern "C" fn RSVerify(signature_raw: DynArray, M: *const libc::c_char, public_keys_raw: *mut DynArray, public_keys_size: size_t) -> libc::c_char {
+pub extern "C" fn RSVerify(signature_raw: DynArray, message_raw: *mut u8, message_size: libc::size_t, public_keys_raw: *mut DynArray, public_keys_size: size_t) -> libc::c_char {
     // getting signature
     let signature_bytes = BytesFromPointer(signature_raw.array, signature_raw.length);
     // TODO: deserialize signature
     let signature: Signature;
     
     // getting m
-    let M_cstr = unsafe { CStr::from_ptr(M) };
-    let m = M_cstr.to_str().unwrap();
+    let m = BytesFromPointer(message_raw, message_size);
     
     let public_keys = PublicKeysBytes2dVectorFromPointer(public_keys_raw, public_keys_size);
-    
-    // debugging
-    println!("Message rust: {:?}", m);
 
     // function end
     // preventing deallocation
@@ -500,7 +490,7 @@ pub extern "C" fn HasLinkInList(signature_raw: DynArray, signatures_raw: *mut Dy
     return 0;
 }
 
-pub fn Sign(x: &Scalar, M: &str, R: &[RistrettoPoint]) -> Signature {
+pub fn Sign(x: &Scalar, M: &[u8], R: &[RistrettoPoint]) -> Signature {
     let G = util::hash_to_point("G"); 
 
     let mut l: usize = 0;
@@ -521,7 +511,7 @@ pub fn Sign(x: &Scalar, M: &str, R: &[RistrettoPoint]) -> Signature {
     return base_prove(R, &l, x, &m, M);
 }
 
-pub fn Verify(sgn: &Signature, M: &str, R: &[RistrettoPoint]) ->  Result<(), Errors> {
+pub fn Verify(sgn: &Signature, M: &[u8], R: &[RistrettoPoint]) ->  Result<(), Errors> {
     let size = R.len();
     let mut base = 1;
     let mut m = 0;
