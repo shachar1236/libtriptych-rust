@@ -7,6 +7,7 @@ use libc::size_t;
 
 use crate::util;
 use crate::Errors::{self, TriptychError};
+use core::num::flt2dec::Sign;
 use std::convert::TryInto;
 use std::ffi::CStr;
 use sha2::Sha512;
@@ -305,7 +306,7 @@ fn PrivateKeyBytesFromPointer(ptr: *mut u8) -> Box<[u8; PRIVATE_KEY_SIZE]>  {
     return private_key_bytes;
 }
 
-fn PublicKeyBytesFromPointer(ptr: *mut u8, len: size_t) -> Box<[u8]>  {
+fn BytesFromPointer(ptr: *mut u8, len: size_t) -> Box<[u8]>  {
     let ret = unsafe {
         Vec::from_raw_parts(ptr, len, len)
     };
@@ -330,14 +331,14 @@ pub struct DynArray {
     length: libc::size_t,
 }
 
-fn PublicKeysVectorFromPointer(public_keys_raw: *mut DynArray, public_keys_size: size_t) -> Vec<RistrettoPoint> {
+fn Bytes2dVectorFromPointer(public_keys_raw: *mut DynArray, public_keys_size: size_t) -> Vec<RistrettoPoint> {
     // getting public keys
     let public_keys_bytes = unsafe { std::slice::from_raw_parts(public_keys_raw, public_keys_size) };
 
     // proccessing keys
     let mut public_keys: Vec<RistrettoPoint> = Vec::with_capacity(public_keys_size);
     for (i, key_bytes) in public_keys_bytes.iter().enumerate() {
-        let ser_pk = PublicKeyBytesFromPointer(key_bytes.array, key_bytes.length);
+        let ser_pk = BytesFromPointer(key_bytes.array, key_bytes.length);
         println!("Public key rust: {:?}", ser_pk);
         // getting key
         public_keys.push(DeserializePublicKey(&ser_pk).unwrap());
@@ -415,7 +416,7 @@ pub extern "C" fn RSSign(private_key_ptr: *mut u8, M: *const libc::c_char, publi
     let M_cstr = unsafe { CStr::from_ptr(M) };
     let m = M_cstr.to_str().unwrap();
     
-    let public_keys = PublicKeysVectorFromPointer(public_keys_raw, public_keys_size);
+    let public_keys = Bytes2dVectorFromPointer(public_keys_raw, public_keys_size);
     
     // debugging
     println!("Private key rust: {:?}", private_key_bytes);
@@ -430,6 +431,32 @@ pub extern "C" fn RSSign(private_key_ptr: *mut u8, M: *const libc::c_char, publi
     
     // let res_bytes = SerializeSignature()
     return DynArray{array: std::ptr::null_mut(), length: 0};
+}
+
+pub extern "C" fn RSVerify(signature_raw: DynArray, M: *const libc::c_char, public_keys_raw: *mut DynArray, public_keys_size: size_t) -> libc::c_char {
+    // getting signature
+    let signature_bytes = BytesFromPointer(signature_raw.array, signature_raw.length);
+    // TODO: deserialize signature
+    let signature: Signature;
+    
+    // getting m
+    let M_cstr = unsafe { CStr::from_ptr(M) };
+    let m = M_cstr.to_str().unwrap();
+    
+    let public_keys = Bytes2dVectorFromPointer(public_keys_raw, public_keys_size);
+    
+    // debugging
+    println!("Message rust: {:?}", m);
+
+    // function end
+    // preventing deallocation
+    Box::into_raw(signature_bytes);
+    
+    // calling function
+    let res = Verify(&signature, m, &public_keys);
+    
+    // let res_bytes = SerializeSignature()
+    return if res.is_ok() { 1 } else { 0 };
 }
 
 pub fn Sign(x: &Scalar, M: &str, R: &[RistrettoPoint]) -> Signature {
