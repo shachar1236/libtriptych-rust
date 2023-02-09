@@ -1,4 +1,5 @@
 #![allow(non_snake_case)]
+use bincode::ErrorKind;
 use serde::{Deserialize, Serialize};
 use std::fs::File;
 use curve25519_dalek::ristretto::{RistrettoPoint};
@@ -47,13 +48,13 @@ pub struct Signature {
 }
 
 //deserialize signature
-pub fn SerializeSignature(S: &Signature) -> Result<Vec<u8>, Box<bincode::ErrorKind>>{
-    let encoded: Vec<u8> = bincode::serialize(&S).unwrap();
+pub fn SerializeSignature(S: &Signature) -> Result<Vec<u8>, Box<ErrorKind>>{
+    let encoded = bincode::serialize(&S);
     return encoded;
 }
 
 pub fn DeserializeSignature(bytes: &[u8]) -> Result<Signature, Box<bincode::ErrorKind>>{
-    return bincode::deserialize(&bytes[..]).unwrap();
+    return bincode::deserialize(&bytes[..]);
 }
 
 pub fn GetSize(sgn: &Signature) ->  usize {
@@ -344,7 +345,7 @@ pub struct DynArray {
     length: libc::size_t,
 }
 
-fn PublicKeysBytes2dVectorFromPointer(public_keys_raw: *mut DynArray, public_keys_size: size_t) -> Vec<RistrettoPoint> {
+fn PublicKeysBytes2dVectorFromPointer(public_keys_raw: *mut DynArray, public_keys_size: size_t) -> Result<Vec<RistrettoPoint>, bool> {
     // getting public keys
     let public_keys_bytes = unsafe { std::slice::from_raw_parts(public_keys_raw, public_keys_size) };
 
@@ -353,18 +354,29 @@ fn PublicKeysBytes2dVectorFromPointer(public_keys_raw: *mut DynArray, public_key
     for key_bytes in public_keys_bytes.iter() {
         let ser_pk = BytesFromPointer(key_bytes.array, key_bytes.length);
         // getting key
-        public_keys.push(DeserializePublicKey(&ser_pk).unwrap());
+        let key_result = DeserializePublicKey(&ser_pk);
         // prevents deallocation
         let mut ser_pk = std::mem::ManuallyDrop::new(ser_pk);
+        // checking result
+        match key_result {
+            Ok(key) => {
+                public_keys.push(key);
+            },
+            Err(e) => {
+                // prevents deallocation
+                std::mem::forget(public_keys_bytes);
+                return Err(true);
+            }
+        }
     }
     
     // prevents deallocation
     std::mem::forget(public_keys_bytes);
     
-    return public_keys;
+    return Ok(public_keys);
 }
 
-fn SignaturesBytes2dVectorFromPointer(signatures_raw: *mut DynArray, num_of_signatures: size_t) -> Vec<Signature> {
+fn SignaturesBytes2dVectorFromPointer(signatures_raw: *mut DynArray, num_of_signatures: size_t) -> Result<Vec<Signature>, bool> {
     // getting public keys
     let signatures_bytes = unsafe { std::slice::from_raw_parts(signatures_raw, num_of_signatures) };
 
@@ -372,18 +384,28 @@ fn SignaturesBytes2dVectorFromPointer(signatures_raw: *mut DynArray, num_of_sign
     let mut signatures: Vec<Signature> = Vec::with_capacity(num_of_signatures);
     for sgn_bytes in signatures_bytes.iter() {
         let ser_sgn = BytesFromPointer(sgn_bytes.array, sgn_bytes.length);
-        // getting signature
-        // TODO: deserialize signature
-        let signature: Signature;
-        signatures.push(signature);
         // prevents deallocation
         let mut ser_sgn = std::mem::ManuallyDrop::new(ser_sgn);
+        // getting signature
+        let signature_result = DeserializeSignature(&ser_sgn);
+
+        match signature_result {
+            Ok(signature) => {
+                signatures.push(signature);
+            },
+            Err(e) => {
+                // prevents deallocation
+                std::mem::forget(signatures_bytes);
+                return Err(true);
+            }
+        }
+
     }
     
     // prevents deallocation
     std::mem::forget(signatures_bytes);
     
-    return signatures;
+    return Ok(signatures);
 }
 
 #[no_mangle]
@@ -414,17 +436,53 @@ pub extern "C" fn GeneratePrivateKey() -> *mut u8 {
     return Box::into_raw(ser_vec.into_boxed_slice()) as *mut u8;
 }
 
+fn EmptyDynArray() -> DynArray {
+    return DynArray{
+        length: 0,
+        array: 0 as *mut u8,
+    };
+}
+
 #[no_mangle]
-pub extern "C" fn GeneratePublicKeyFromPrivateKey(private_key_ptr: *mut u8) -> DynArray {
+pub extern "C" fn GeneratePublicKeyFromPrivateKey(private_key_ptr: *mut u8, error_occured: *mut libc::c_char) -> DynArray {
     let private_key = PrivateKeyBytesFromPointer(private_key_ptr);
-    // bad code. should check if good before unwraaping
-    let r = DeserializePrivateKey(&private_key).unwrap();
+    
+    let deallo_prevent = || {
+        // prevents deallocation in rust
+        Box::into_raw(private_key);
+    };
+    
+    let r_result = DeserializePrivateKey(&private_key);
+    let r: Scalar;
+    if let Some(sc) = r_result {
+        r = sc;
+    } else {
+        deallo_prevent();
+        unsafe {
+            *error_occured = 1;
+        }
+        return EmptyDynArray();
+    }
 
     let G = util::hash_to_point("G"); 
     
     let public_key: RistrettoPoint = r*G;
     // bad code. should check if good before unwraaping
-    let mut ser = SerializePublicKey(&public_key).unwrap().into_boxed_slice();
+    let mut ser_result = SerializePublicKey(&public_key);
+    let ser: Box<[u8]>;
+    match ser_result {
+        Ok(bytes) => {
+            ser = bytes.into_boxed_slice();
+        },
+        Err(e) => {
+            deallo_prevent();
+            unsafe {
+                *error_occured = 1;
+            }
+            
+            return EmptyDynArray();
+        }
+    }
     
     // println!("pub key rust: {:?}", ser);
 
@@ -433,73 +491,167 @@ pub extern "C" fn GeneratePublicKeyFromPrivateKey(private_key_ptr: *mut u8) -> D
         array: Box::into_raw(ser) as *mut u8,
     };
 
-    // prevents deallocation in rust
-    Box::into_raw(private_key);
+    deallo_prevent();
 
     return arr;
 }
 
 #[no_mangle]
-pub extern "C" fn RSSign(private_key_ptr: *mut u8, message_raw: *mut u8, message_size: libc::size_t, public_keys_raw: *mut DynArray, public_keys_size: size_t) -> DynArray {
+pub extern "C" fn RSSign(private_key_ptr: *mut u8, message_raw: *mut u8, message_size: libc::size_t, public_keys_raw: *mut DynArray, public_keys_size: size_t, error_occured: *mut libc::c_char) -> DynArray {
     // getting private keys
     let private_key_bytes = PrivateKeyBytesFromPointer(private_key_ptr);
     
-    let private_key = DeserializePrivateKey(&private_key_bytes).unwrap();
+    let private_key_option = DeserializePrivateKey(&private_key_bytes);
+    let private_key: Scalar;
+    match private_key_option {
+        Some(s) => {
+            private_key = s;
+        },
+        None => {
+            unsafe {
+                *error_occured = 1;
+            }
+            return EmptyDynArray();
+        },
+    }
+    
+    let deallo_prevent = || {
+        // preventing deallocation
+        Box::into_raw(private_key_bytes);
+    };
     
     // getting m
     let m = BytesFromPointer(message_raw, message_size);
     
-    let public_keys = PublicKeysBytes2dVectorFromPointer(public_keys_raw, public_keys_size);
+    let public_keys_result = PublicKeysBytes2dVectorFromPointer(public_keys_raw, public_keys_size);
+    let public_keys: Vec<RistrettoPoint>;
+    match public_keys_result {
+        Ok(r) => {
+            public_keys = r;
+        },
+        Err(e) => {
+            deallo_prevent();
+            unsafe {
+                *error_occured = 1;
+            }
+            return EmptyDynArray();
+        }
+    }
     
     // function end
-    // preventing deallocation
-    Box::into_raw(private_key_bytes);
+    deallo_prevent();
     
     // calling function
-    let res = Sign(&private_key, m, &public_keys);
+    let res = Sign(&private_key, &m, &public_keys);
     
-    // let res_bytes = SerializeSignature()
+    let signature_result = SerializeSignature(&res);
+    match signature_result {
+        Ok(sig) => {
+            let sigRes = sig.into_boxed_slice();
+            return DynArray{array: Box::into_raw(sigRes) as *mut u8, length: sigRes.len()};
+        },
+        Err(e) => {
+            unsafe {
+                *error_occured = 1;
+            }
+        }
+    }
     return DynArray{array: std::ptr::null_mut(), length: 0};
 }
 
-pub extern "C" fn RSVerify(signature_raw: DynArray, message_raw: *mut u8, message_size: libc::size_t, public_keys_raw: *mut DynArray, public_keys_size: size_t) -> libc::c_char {
+pub extern "C" fn RSVerify(signature_raw: DynArray, message_raw: *mut u8, message_size: libc::size_t, public_keys_raw: *mut DynArray, public_keys_size: size_t, error_occured: *mut libc::c_char) -> libc::c_char {
     // getting signature
     let signature_bytes = BytesFromPointer(signature_raw.array, signature_raw.length);
-    // TODO: deserialize signature
+    
+    let deallo_prevent = || {
+        // preventing deallocation
+        Box::into_raw(signature_bytes);
+    };
+
+    let signature_result = DeserializeSignature(&signature_bytes);
     let signature: Signature;
+    match signature_result {
+        Ok(s) => {
+            signature = s;
+        },
+        Err(e) => {
+            deallo_prevent();
+            unsafe {
+                *error_occured = 1;
+            }
+            return 0;
+        }
+    }
     
     // getting m
     let m = BytesFromPointer(message_raw, message_size);
     
-    let public_keys = PublicKeysBytes2dVectorFromPointer(public_keys_raw, public_keys_size);
+    let public_keys_result = PublicKeysBytes2dVectorFromPointer(public_keys_raw, public_keys_size);
+    let public_keys: Vec<RistrettoPoint>;
+    match public_keys_result {
+        Ok(r) => {
+            public_keys = r;
+        },
+        Err(e) => {
+            deallo_prevent();
+            unsafe {
+                *error_occured = 1;
+            }
+            return 0;
+        }
+    }
 
     // function end
-    // preventing deallocation
-    Box::into_raw(signature_bytes);
+    deallo_prevent();
     
     // calling function
-    let res = Verify(&signature, m, &public_keys);
+    let res = Verify(&signature, &m, &public_keys);
     
     // let res_bytes = SerializeSignature()
     return if res.is_ok() { 1 } else { 0 };
 }
 
-pub extern "C" fn HasLinkInList(signature_raw: DynArray, signatures_raw: *mut DynArray, num_of_signatures: size_t) -> libc::c_char {
+pub extern "C" fn HasLinkInList(signature_raw: DynArray, signatures_raw: *mut DynArray, num_of_signatures: size_t, error_occured: *mut libc::c_char) -> libc::c_char {
     // getting signature
     let signature_bytes = BytesFromPointer(signature_raw.array, signature_raw.length);
-    // TODO: deserialize signature
-    let signature: Signature;
+    let signature_result = DeserializeSignature(&signature_bytes);
+    
     // preventing deallocation
     Box::into_raw(signature_bytes);
+
+    let signature: Signature;
+    match signature_result {
+        Ok(s) => {
+            signature = s;
+        },
+        Err(e) => {
+            unsafe {
+                *error_occured = 1;
+            }
+            return 0;
+        }
+    }
     
-    let signatures_array = SignaturesBytes2dVectorFromPointer(signatures_raw, num_of_signatures);
+    let signatures_array_reult = SignaturesBytes2dVectorFromPointer(signatures_raw, num_of_signatures);
+    let signatures_array: Vec<Signature>;
+    match signatures_array_reult {
+        Ok(s) => {
+            signatures_array = s;
+        },
+        Err(e) => {
+            unsafe {
+                *error_occured = 1;
+            }
+            return 0;
+        }
+    }
+
     for sgn in signatures_array.iter() {
         if Link(&signature, sgn) {
             return 1;
         }
     }
     
-    // let res_bytes = SerializeSignature()
     return 0;
 }
 
