@@ -1,5 +1,6 @@
 #![allow(non_snake_case)]
-
+use serde::{Deserialize, Serialize};
+use std::fs::File;
 use curve25519_dalek::ristretto::{RistrettoPoint};
 use curve25519_dalek::scalar::Scalar;
 use curve25519_dalek::traits::Identity;
@@ -20,7 +21,7 @@ use std::alloc::Layout;
 use std::alloc::dealloc;
 
 // #[derive(Clone, Debug, Serialize, Deserialize)]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TriptychEllipticCurveState {
     J: RistrettoPoint,
     A: RistrettoPoint,
@@ -31,7 +32,7 @@ pub struct TriptychEllipticCurveState {
     Y: Vec<RistrettoPoint>
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TriptychScalarState {
     f: Vec<Vec<Scalar>>,
     zA: Scalar,
@@ -39,10 +40,20 @@ pub struct TriptychScalarState {
     z: Scalar
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Signature {
     a: TriptychEllipticCurveState,
     z: TriptychScalarState
+}
+
+//deserialize signature
+pub fn SerializeSignature(S: &Signature) -> Result<Vec<u8>, Box<bincode::ErrorKind>>{
+    let encoded: Vec<u8> = bincode::serialize(&S).unwrap();
+    return encoded;
+}
+
+pub fn DeserializeSignature(bytes: &[u8]) -> Result<Signature, Box<bincode::ErrorKind>>{
+    return bincode::deserialize(&bytes[..]).unwrap();
 }
 
 pub fn GetSize(sgn: &Signature) ->  usize {
@@ -269,6 +280,8 @@ pub fn KeyGen() -> (Scalar, RistrettoPoint) {
 
     return (r, r*G);
 }
+
+
 
 pub fn SerializePublicKey(R: &RistrettoPoint) -> Result<Vec<u8>, Box<bincode::ErrorKind>> {
     let encoded = bincode::serialize(&R);
