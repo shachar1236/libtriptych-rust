@@ -9,7 +9,6 @@ use libc::size_t;
 
 use crate::util;
 use crate::Errors::{self, TriptychError};
-use core::num::flt2dec::Sign;
 use std::convert::TryInto;
 use std::ffi::CStr;
 use sha2::Sha512;
@@ -300,8 +299,8 @@ pub fn SerializePrivateKey(sc: &Scalar) ->  [u8; PRIVATE_KEY_SIZE] {
     return encoded;
 }
 
-pub fn DeserializePrivateKey(bytes: &[u8; 32]) ->  Option<Scalar> {
-    return  Scalar::from_canonical_bytes(*bytes).into();
+pub fn DeserializePrivateKey(bytes: &Box<[u8; 32]>) ->  Option<Scalar> {
+    return  Scalar::from_canonical_bytes(**bytes).into();
 }
 
 pub fn SerializePublicKeysList(R: &[RistrettoPoint]) -> Result<Vec<u8>, Box<bincode::ErrorKind>> {
@@ -447,12 +446,14 @@ fn EmptyDynArray() -> DynArray {
 pub extern "C" fn GeneratePublicKeyFromPrivateKey(private_key_ptr: *mut u8, error_occured: *mut libc::c_char) -> DynArray {
     let private_key = PrivateKeyBytesFromPointer(private_key_ptr);
     
+    
+    let r_result = DeserializePrivateKey(&private_key);
+
     let deallo_prevent = || {
         // prevents deallocation in rust
         Box::into_raw(private_key);
     };
-    
-    let r_result = DeserializePrivateKey(&private_key);
+
     let r: Scalar;
     if let Some(sc) = r_result {
         r = sc;
@@ -548,7 +549,10 @@ pub extern "C" fn RSSign(private_key_ptr: *mut u8, message_raw: *mut u8, message
     match signature_result {
         Ok(sig) => {
             let sigRes = sig.into_boxed_slice();
-            return DynArray{array: Box::into_raw(sigRes) as *mut u8, length: sigRes.len()};
+            return DynArray{
+                length: sigRes.len(),
+                array: Box::into_raw(sigRes) as *mut u8
+            };
         },
         Err(e) => {
             unsafe {
@@ -563,12 +567,14 @@ pub extern "C" fn RSVerify(signature_raw: DynArray, message_raw: *mut u8, messag
     // getting signature
     let signature_bytes = BytesFromPointer(signature_raw.array, signature_raw.length);
     
+
+    let signature_result = DeserializeSignature(&signature_bytes);
+
     let deallo_prevent = || {
         // preventing deallocation
         Box::into_raw(signature_bytes);
     };
 
-    let signature_result = DeserializeSignature(&signature_bytes);
     let signature: Signature;
     match signature_result {
         Ok(s) => {
