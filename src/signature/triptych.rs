@@ -563,6 +563,7 @@ pub extern "C" fn RSSign(private_key_ptr: *mut u8, message_raw: *mut u8, message
     return DynArray{array: std::ptr::null_mut(), length: 0};
 }
 
+#[no_mangle]
 pub extern "C" fn RSVerify(signature_raw: DynArray, message_raw: *mut u8, message_size: libc::size_t, public_keys_raw: *mut DynArray, public_keys_size: size_t, error_occured: *mut libc::c_char) -> libc::c_char {
     // getting signature
     let signature_bytes = BytesFromPointer(signature_raw.array, signature_raw.length);
@@ -617,6 +618,7 @@ pub extern "C" fn RSVerify(signature_raw: DynArray, message_raw: *mut u8, messag
     return if res.is_ok() { 1 } else { 0 };
 }
 
+#[no_mangle]
 pub extern "C" fn HasLinkInList(signature_raw: DynArray, signatures_raw: *mut DynArray, num_of_signatures: size_t, error_occured: *mut libc::c_char) -> libc::c_char {
     // getting signature
     let signature_bytes = BytesFromPointer(signature_raw.array, signature_raw.length);
