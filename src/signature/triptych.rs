@@ -339,9 +339,35 @@ pub extern "C" fn FreeVector(ptr: *mut u8, len: size_t) {
 
 
 #[repr(C)]
+#[derive(Clone)]
 pub struct DynArray {
     array: *mut u8,
     length: libc::size_t,
+}
+
+fn EmptyDynArray() -> DynArray {
+    return DynArray{
+        length: 0,
+        array: 0 as *mut u8,
+    };
+}
+
+
+#[no_mangle]
+pub extern "C" fn AllocDynArrayVector(len: size_t) -> *mut DynArray {
+    let c = vec![DynArray{ length: 0, array: 0 as *mut u8};len];
+    let BoxC = c.into_boxed_slice();
+    return Box::into_raw(BoxC) as *mut DynArray;
+}
+
+#[no_mangle]
+pub extern "C" fn FreeDynArrayVector(ptr: *mut DynArray, len: size_t) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe {
+        Vec::from_raw_parts(ptr, len, len);
+    }
 }
 
 fn PublicKeysBytes2dVectorFromPointer(public_keys_raw: *mut DynArray, public_keys_size: size_t) -> Result<Vec<RistrettoPoint>, bool> {
@@ -433,13 +459,6 @@ pub extern "C" fn GeneratePrivateKey() -> *mut u8 {
     let ser_vec = ser.to_vec();
 
     return Box::into_raw(ser_vec.into_boxed_slice()) as *mut u8;
-}
-
-fn EmptyDynArray() -> DynArray {
-    return DynArray{
-        length: 0,
-        array: 0 as *mut u8,
-    };
 }
 
 #[no_mangle]
