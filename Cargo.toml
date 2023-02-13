@@ -33,3 +33,6 @@ criterion = "0.3"
 [[bench]]
 name = "signature_bench"
 harness = false
+
+[build-dependencies]
+cbindgen = "0.24.3"
