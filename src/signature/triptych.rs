@@ -418,7 +418,7 @@ fn SignaturesBytes2dVectorFromPointer(signatures_raw: *mut DynArray, num_of_sign
     for sgn_bytes in signatures_bytes.iter() {
         let ser_sgn = BytesFromPointer(sgn_bytes.array, sgn_bytes.length);
         // prevents deallocation
-        let mut ser_sgn = std::mem::ManuallyDrop::new(ser_sgn);
+        let ser_sgn = std::mem::ManuallyDrop::new(ser_sgn);
         // getting signature
         let signature_result = DeserializeSignature(&ser_sgn);
 
@@ -460,7 +460,7 @@ pub extern "C" fn GeneratePrivateKey() -> *mut u8 {
     let mut rng = rand::thread_rng();
     let r = Scalar::random(&mut rng);
 
-    let mut ser= SerializePrivateKey(&r);
+    let ser= SerializePrivateKey(&r);
     
     // println!("priv key rust:{:?}", ser);
     
@@ -682,7 +682,7 @@ pub extern "C" fn HasLinkInList(signature_raw: DynArray, signatures_raw: *mut Dy
         Ok(s) => {
             signatures_array = s;
         },
-        Err(e) => {
+        Err(_e) => {
             unsafe {
                 *error_occured = 1;
             }
