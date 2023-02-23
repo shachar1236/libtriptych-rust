@@ -496,7 +496,7 @@ pub extern "C" fn GeneratePublicKeyFromPrivateKey(private_key_ptr: *mut u8, erro
     
     let public_key: RistrettoPoint = r*G;
     // bad code. should check if good before unwraaping
-    let mut ser_result = SerializePublicKey(&public_key);
+    let ser_result = SerializePublicKey(&public_key);
     let ser: Box<[u8]>;
     match ser_result {
         Ok(bytes) => {
@@ -582,7 +582,7 @@ pub extern "C" fn RSSign(private_key_ptr: *mut u8, message_raw: *mut u8, message
     match signature_result {
         Ok(sig) => {
             // println!("Converting sig to boxed silice");
-            let mut sigRes = sig.into_boxed_slice();
+            let sigRes = sig.into_boxed_slice();
             let sigLen = sigRes.len();
             // println!("Returning sig");
             let p = Box::into_raw(sigRes) as *mut u8;
