@@ -633,7 +633,7 @@ pub extern "C" fn RSVerify(signature_raw: DynArray, message_raw: *mut u8, messag
         Ok(r) => {
             public_keys = r;
         },
-        Err(e) => {
+        Err(_e) => {
             Box::into_raw(signature_bytes);
             Box::into_raw(m);
             unsafe {
@@ -668,7 +668,7 @@ pub extern "C" fn HasLinkInList(signature_raw: DynArray, signatures_raw: *mut Dy
         Ok(s) => {
             signature = s;
         },
-        Err(e) => {
+        Err(_e) => {
             unsafe {
                 *error_occured = 1;
             }
