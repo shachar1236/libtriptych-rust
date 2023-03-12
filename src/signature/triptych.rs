@@ -1,24 +1,24 @@
 #![allow(non_snake_case)]
 use bincode::ErrorKind;
-use serde::{Deserialize, Serialize};
-use std::fs::File;
-use curve25519_dalek::ristretto::{RistrettoPoint};
+use curve25519_dalek::ristretto::RistrettoPoint;
 use curve25519_dalek::scalar::Scalar;
 use curve25519_dalek::traits::Identity;
 use libc::size_t;
+use serde::{Deserialize, Serialize};
+use std::fs::File;
 
 use crate::util;
 use crate::Errors::{self, TriptychError};
+use sha2::Sha512;
 use std::convert::TryInto;
 use std::ffi::CStr;
-use sha2::Sha512;
 
 // use serde::{Serialize, Deserialize};
 
+use std::alloc::dealloc;
+use std::alloc::Layout;
 use std::mem::size_of_val;
 use std::ptr::drop_in_place;
-use std::alloc::Layout;
-use std::alloc::dealloc;
 
 // #[derive(Clone, Debug, Serialize, Deserialize)]
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -29,7 +29,7 @@ pub struct TriptychEllipticCurveState {
     C: RistrettoPoint,
     D: RistrettoPoint,
     X: Vec<RistrettoPoint>,
-    Y: Vec<RistrettoPoint>
+    Y: Vec<RistrettoPoint>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -37,26 +37,26 @@ pub struct TriptychScalarState {
     f: Vec<Vec<Scalar>>,
     zA: Scalar,
     zC: Scalar,
-    z: Scalar
+    z: Scalar,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Signature {
     a: TriptychEllipticCurveState,
-    z: TriptychScalarState
+    z: TriptychScalarState,
 }
 
 //deserialize signature
-pub fn SerializeSignature(S: &Signature) -> Result<Vec<u8>, Box<ErrorKind>>{
+pub fn SerializeSignature(S: &Signature) -> Result<Vec<u8>, Box<ErrorKind>> {
     let encoded = bincode::serialize(&S);
     return encoded;
 }
 
-pub fn DeserializeSignature(bytes: &[u8]) -> Result<Signature, Box<bincode::ErrorKind>>{
+pub fn DeserializeSignature(bytes: &[u8]) -> Result<Signature, Box<bincode::ErrorKind>> {
     return bincode::deserialize(&bytes[..]);
 }
 
-pub fn GetSize(sgn: &Signature) ->  usize {
+pub fn GetSize(sgn: &Signature) -> usize {
     let mut size = size_of_val(&sgn.a.J);
     size += size_of_val(&sgn.a.A);
     size += size_of_val(&sgn.a.B);
@@ -76,30 +76,33 @@ pub fn GetSize(sgn: &Signature) ->  usize {
 }
 
 // This is the core Sigma Protocol being implemented, not the signature protocol
-fn base_prove(M: &[RistrettoPoint], l: &usize, r: &Scalar, m: &usize, message: &[u8]) -> Signature{
+fn base_prove(M: &[RistrettoPoint], l: &usize, r: &Scalar, m: &usize, message: &[u8]) -> Signature {
     let n: usize = 2; // base of decomposition, Tryptich supports arbitary base, we prefer binary here
 
     let U = util::hash_to_point("U");
 
-    let G = util::hash_to_point("G"); 
+    let G = util::hash_to_point("G");
     // In Risretto Curve, all POINTS are generators. G choice is arbitary here
     let mut rng = rand::thread_rng();
 
     let mut transcript: Vec<u8> = Vec::with_capacity(40000);
 
-    let J = r.invert()*U;
+    let J = r.invert() * U;
     let rA = Scalar::random(&mut rng);
     let rB = Scalar::random(&mut rng);
     let rC = Scalar::random(&mut rng);
-    let rD = Scalar::random(&mut rng); 
+    let rD = Scalar::random(&mut rng);
 
-
-    let mut a = (0..*m).map(|_| (0..n).map(|_| Scalar::random(&mut rng)).collect::<Vec<Scalar>>()).collect::<Vec<Vec<Scalar>>>();
+    let mut a = (0..*m)
+        .map(|_| {
+            (0..n)
+                .map(|_| Scalar::random(&mut rng))
+                .collect::<Vec<Scalar>>()
+        })
+        .collect::<Vec<Vec<Scalar>>>();
 
     for entry in &mut a {
-        entry[0] = (1..n).fold(Scalar::zero(), |acc, x|{
-            acc - entry[x]
-        });
+        entry[0] = (1..n).fold(Scalar::zero(), |acc, x| acc - entry[x]);
     }
 
     let A = util::pedersen_commitment(&a, &rA);
@@ -111,21 +114,32 @@ fn base_prove(M: &[RistrettoPoint], l: &usize, r: &Scalar, m: &usize, message: &
     transcript.extend_from_slice(message);
     transcript.extend_from_slice(J.compress().as_bytes());
     transcript.extend_from_slice(A.compress().as_bytes());
-    
-
 
     let s = util::pad(&l, &m);
 
-    let b = (0..*m).map(|j| (0..n).map(|i| util::delta(&s[j], &i)).collect::<Vec<Scalar>>()).collect::<Vec<Vec<Scalar>>>();
+    let b = (0..*m)
+        .map(|j| {
+            (0..n)
+                .map(|i| util::delta(&s[j], &i))
+                .collect::<Vec<Scalar>>()
+        })
+        .collect::<Vec<Vec<Scalar>>>();
 
     let B = util::pedersen_commitment(&b, &rB);
 
-    let c = (0..*m).map(|j| (0..n).map(|i| a[j][i]*(Scalar::one() - b[j][i] - b[j][i])).collect::<Vec<Scalar>>()).collect::<Vec<Vec<Scalar>>>();
+    let c = (0..*m)
+        .map(|j| {
+            (0..n)
+                .map(|i| a[j][i] * (Scalar::one() - b[j][i] - b[j][i]))
+                .collect::<Vec<Scalar>>()
+        })
+        .collect::<Vec<Vec<Scalar>>>();
 
     let C = util::pedersen_commitment(&c, &rC);
 
-   
-    let d = (0..*m).map(|j| (0..n).map(|i| -a[j][i]*a[j][i]).collect::<Vec<Scalar>>()).collect::<Vec<Vec<Scalar>>>();
+    let d = (0..*m)
+        .map(|j| (0..n).map(|i| -a[j][i] * a[j][i]).collect::<Vec<Scalar>>())
+        .collect::<Vec<Vec<Scalar>>>();
 
     let D = util::pedersen_commitment(&d, &rD);
 
@@ -133,30 +147,32 @@ fn base_prove(M: &[RistrettoPoint], l: &usize, r: &Scalar, m: &usize, message: &
     transcript.extend_from_slice(C.compress().as_bytes());
     transcript.extend_from_slice(D.compress().as_bytes());
 
-
     let m_u32: u32 = (*m).try_into().unwrap();
     let N = usize::pow(n, m_u32); // we have n = 2, N = 2**m = len(M)
 
     let mut p = (0..N).map(|_| vec![]).collect::<Vec<Vec<Scalar>>>();
 
     for k in 0..N {
-        let binary_k = util::pad(&k, &m); 
+        let binary_k = util::pad(&k, &m);
         p[k] = vec![a[0][binary_k[0]], util::delta(&s[0], &binary_k[0])];
 
         for j in 1..*m {
-            p[k] = util::convolve(&p[k], &vec![a[j][binary_k[j]], util::delta(&s[j], &binary_k[j])]);
+            p[k] = util::convolve(
+                &p[k],
+                &vec![a[j][binary_k[j]], util::delta(&s[j], &binary_k[j])],
+            );
         }
     }
 
-    
+    let rho = (0..*m)
+        .map(|_| Scalar::random(&mut rng))
+        .collect::<Vec<Scalar>>();
 
-    let rho = (0..*m).map(|_| Scalar::random(&mut rng)).collect::<Vec<Scalar>>();
+    let Y = (0..*m).map(|i| rho[i] * J).collect::<Vec<RistrettoPoint>>();
 
-    let Y = (0..*m).map(|i| rho[i]*J).collect::<Vec<RistrettoPoint>>();
-
-    let X = (0..*m).map(|j| (0..N).fold(rho[j]*G, |acc, k|{
-                                            acc + p[k][j]*M[k]
-                                        })).collect::<Vec<RistrettoPoint>>();
+    let X = (0..*m)
+        .map(|j| (0..N).fold(rho[j] * G, |acc, k| acc + p[k][j] * M[k]))
+        .collect::<Vec<RistrettoPoint>>();
 
     for i in 0..*m {
         transcript.extend_from_slice(Y[i].compress().as_bytes());
@@ -164,39 +180,53 @@ fn base_prove(M: &[RistrettoPoint], l: &usize, r: &Scalar, m: &usize, message: &
     }
 
     let ellipticstate: TriptychEllipticCurveState = TriptychEllipticCurveState {
-        J, A, B, C, D, X, Y
+        J,
+        A,
+        B,
+        C,
+        D,
+        X,
+        Y,
     };
-   
+
     let challenge = Scalar::hash_from_bytes::<Sha512>(&transcript);
 
-    let f = (0..*m).map(|j| (1..n).map(|i| util::delta(&s[j], &i)*challenge + a[j][i]).collect::<Vec<Scalar>>()).collect::<Vec<Vec<Scalar>>>();
+    let f = (0..*m)
+        .map(|j| {
+            (1..n)
+                .map(|i| util::delta(&s[j], &i) * challenge + a[j][i])
+                .collect::<Vec<Scalar>>()
+        })
+        .collect::<Vec<Vec<Scalar>>>();
 
-    let zA = rA + challenge*rB;
-    let zC = challenge*rC + rD;
+    let zA = rA + challenge * rB;
+    let zC = challenge * rC + rD;
 
-    
+    let z = r * util::power(&challenge, &m)
+        - (0..*m).fold(Scalar::zero(), |acc, j| {
+            acc + rho[j] * util::power(&challenge, &j)
+        });
 
-    let z = r*util::power(&challenge, &m) - (0..*m).fold(Scalar::zero(), |acc, j|{ acc + rho[j]*util::power(&challenge, &j)});
-
-    let scalarstate: TriptychScalarState = TriptychScalarState {
-        f, zA, zC, z
-    };
+    let scalarstate: TriptychScalarState = TriptychScalarState { f, zA, zC, z };
 
     return Signature {
-        a: ellipticstate, z: scalarstate
+        a: ellipticstate,
+        z: scalarstate,
     };
-
 }
 
 // Verification of the base sigma protocol
-fn base_verify(M: &[RistrettoPoint], sgn: &Signature, m: &usize, message: &[u8]) -> Result<(), Errors> {
-    
+fn base_verify(
+    M: &[RistrettoPoint],
+    sgn: &Signature,
+    m: &usize,
+    message: &[u8],
+) -> Result<(), Errors> {
     let mut transcript: Vec<u8> = Vec::with_capacity(1000);
     let ellipticState = &sgn.a;
     let scalarState = &sgn.z;
-    let G = util::hash_to_point("G"); 
+    let G = util::hash_to_point("G");
     let U = util::hash_to_point("U");
-
 
     let n = 2;
     let m_u32: u32 = (*m).try_into().unwrap();
@@ -224,108 +254,112 @@ fn base_verify(M: &[RistrettoPoint], sgn: &Signature, m: &usize, message: &[u8])
     for i in 0..*m {
         f[i][0] = challenge;
         for j in 1..n {
-            f[i][j] = scalarState.f[i][j-1];
+            f[i][j] = scalarState.f[i][j - 1];
             f[i][0] = f[i][0] - f[i][j];
         }
     }
 
     let comFirst = util::pedersen_commitment(&f, &scalarState.zA);
 
-    let fMult = (0..*m).map(|j| (0..n).map(|i| f[j][i]*(challenge - f[j][i])).collect::<Vec<Scalar>>()).collect::<Vec<Vec<Scalar>>>();
+    let fMult = (0..*m)
+        .map(|j| {
+            (0..n)
+                .map(|i| f[j][i] * (challenge - f[j][i]))
+                .collect::<Vec<Scalar>>()
+        })
+        .collect::<Vec<Vec<Scalar>>>();
 
     let comSecond = util::pedersen_commitment(&fMult, &scalarState.zC);
 
-    let firstLHS = ellipticState.A + ellipticState.B*challenge;
-    let secondLHS = ellipticState.D + ellipticState.C*challenge;
+    let firstLHS = ellipticState.A + ellipticState.B * challenge;
+    let secondLHS = ellipticState.D + ellipticState.C * challenge;
 
-    let thirdLHS = (0..*m).fold(scalarState.z*G, |acc, j|{
-        acc + ellipticState.X[j]*util::power(&challenge, &j)
+    let thirdLHS = (0..*m).fold(scalarState.z * G, |acc, j| {
+        acc + ellipticState.X[j] * util::power(&challenge, &j)
     });
 
-    let fourthLHS = (0..*m).fold(scalarState.z*ellipticState.J, |acc, j|{
-        acc + ellipticState.Y[j]*util::power(&challenge, &j)
+    let fourthLHS = (0..*m).fold(scalarState.z * ellipticState.J, |acc, j| {
+        acc + ellipticState.Y[j] * util::power(&challenge, &j)
     });
 
     let mut thirdRHS = RistrettoPoint::identity();
 
     let mut fourthRHSScalar = Scalar::zero();
     for k in 0..N {
-        let binary_k = util::pad(&k, &m); 
-        
+        let binary_k = util::pad(&k, &m);
+
         let mut product_term = Scalar::one();
 
         for j in 0..*m {
-            product_term = f[j][binary_k[j]]*product_term;
+            product_term = f[j][binary_k[j]] * product_term;
         }
 
-        thirdRHS = thirdRHS + M[k]*product_term;
+        thirdRHS = thirdRHS + M[k] * product_term;
 
         fourthRHSScalar = fourthRHSScalar + product_term;
     }
-    let fourthRHS = U*fourthRHSScalar;
+    let fourthRHS = U * fourthRHSScalar;
 
-    if firstLHS == comFirst && secondLHS == comSecond && thirdLHS == thirdRHS && fourthLHS == fourthRHS {
+    if firstLHS == comFirst
+        && secondLHS == comSecond
+        && thirdLHS == thirdRHS
+        && fourthLHS == fourthRHS
+    {
         return Ok(());
-    }
-    else {
+    } else {
         return Err(TriptychError);
     }
-    
 }
 
 pub fn KeyGen() -> (Scalar, RistrettoPoint) {
     let mut rng = rand::thread_rng();
     let r = Scalar::random(&mut rng);
-    let G = util::hash_to_point("G"); 
+    let G = util::hash_to_point("G");
 
-    return (r, r*G);
+    return (r, r * G);
 }
-
-
 
 pub fn SerializePublicKey(R: &RistrettoPoint) -> Result<Vec<u8>, Box<bincode::ErrorKind>> {
     let encoded = bincode::serialize(&R);
-    return  encoded;
+    return encoded;
 }
 
 pub fn DeserializePublicKey(bytes: &[u8]) -> Result<RistrettoPoint, Box<bincode::ErrorKind>> {
     return bincode::deserialize(&bytes[..]);
 }
 
-const PRIVATE_KEY_SIZE:usize = 32;
+const PRIVATE_KEY_SIZE: usize = 32;
 
-pub fn SerializePrivateKey(sc: &Scalar) ->  [u8; PRIVATE_KEY_SIZE] {
+pub fn SerializePrivateKey(sc: &Scalar) -> [u8; PRIVATE_KEY_SIZE] {
     let encoded = sc.to_bytes();
     return encoded;
 }
 
-pub fn DeserializePrivateKey(bytes: &Box<[u8; 32]>) ->  Option<Scalar> {
-    return  Scalar::from_canonical_bytes(**bytes).into();
+pub fn DeserializePrivateKey(bytes: &Box<[u8; 32]>) -> Option<Scalar> {
+    return Scalar::from_canonical_bytes(**bytes).into();
 }
 
 pub fn SerializePublicKeysList(R: &[RistrettoPoint]) -> Result<Vec<u8>, Box<bincode::ErrorKind>> {
     let encoded = bincode::serialize(&R);
-    return  encoded;
+    return encoded;
 }
 
-pub fn DeserializePublicKeysList(bytes: Vec<u8>) -> Result<Vec<RistrettoPoint>, Box<bincode::ErrorKind>> {
-    return  bincode::deserialize(&bytes[..]);
+pub fn DeserializePublicKeysList(
+    bytes: Vec<u8>,
+) -> Result<Vec<RistrettoPoint>, Box<bincode::ErrorKind>> {
+    return bincode::deserialize(&bytes[..]);
 }
 
-fn PrivateKeyBytesFromPointer(ptr: *mut u8) -> Box<[u8; PRIVATE_KEY_SIZE]>  {
-    let private_key_bytes: Box<[u8; PRIVATE_KEY_SIZE]> = unsafe {
-        Box::from_raw(ptr as *mut [u8; PRIVATE_KEY_SIZE])
-    };
+fn PrivateKeyBytesFromPointer(ptr: *mut u8) -> Box<[u8; PRIVATE_KEY_SIZE]> {
+    let private_key_bytes: Box<[u8; PRIVATE_KEY_SIZE]> =
+        unsafe { Box::from_raw(ptr as *mut [u8; PRIVATE_KEY_SIZE]) };
     return private_key_bytes;
 }
 
-fn BytesFromPointer(ptr: *mut u8, len: size_t) -> Box<[u8]>  {
-    let ret = unsafe {
-        Vec::from_raw_parts(ptr, len, len)
-    };
+fn BytesFromPointer(ptr: *mut u8, len: size_t) -> Box<[u8]> {
+    let ret = unsafe { Vec::from_raw_parts(ptr, len, len) };
     return ret.into_boxed_slice();
 }
-
 
 #[no_mangle]
 pub extern "C" fn FreeVector(ptr: *mut u8, len: size_t) {
@@ -337,7 +371,6 @@ pub extern "C" fn FreeVector(ptr: *mut u8, len: size_t) {
     }
 }
 
-
 #[repr(C)]
 pub struct DynArray {
     array: *mut u8,
@@ -345,18 +378,17 @@ pub struct DynArray {
 }
 
 fn EmptyDynArray() -> DynArray {
-    return DynArray{
+    return DynArray {
         length: 0,
         array: std::ptr::null_mut() as *mut u8,
     };
 }
 
-
 #[no_mangle]
 pub extern "C" fn AllocDynArrayVector(len: size_t) -> *mut DynArray {
     let mut c = Vec::with_capacity(len);
     for _ in 0..len {
-        c.push(DynArray{
+        c.push(DynArray {
             length: 0,
             array: 0 as *mut u8,
         });
@@ -375,9 +407,13 @@ pub extern "C" fn FreeDynArrayVector(ptr: *mut DynArray, len: size_t) {
     }
 }
 
-fn PublicKeysBytes2dVectorFromPointer(public_keys_raw: *mut DynArray, public_keys_size: size_t) -> Result<Vec<RistrettoPoint>, bool> {
+fn PublicKeysBytes2dVectorFromPointer(
+    public_keys_raw: *mut DynArray,
+    public_keys_size: size_t,
+) -> Result<Vec<RistrettoPoint>, bool> {
     // getting public keys
-    let public_keys_bytes = unsafe { std::slice::from_raw_parts(public_keys_raw, public_keys_size) };
+    let public_keys_bytes =
+        unsafe { std::slice::from_raw_parts(public_keys_raw, public_keys_size) };
 
     // proccessing keys
     let mut public_keys: Vec<RistrettoPoint> = Vec::with_capacity(public_keys_size);
@@ -392,7 +428,7 @@ fn PublicKeysBytes2dVectorFromPointer(public_keys_raw: *mut DynArray, public_key
             Ok(key) => {
                 // println!("Key rust: {:?}", ser_pk);
                 public_keys.push(key);
-            },
+            }
             Err(e) => {
                 // prevents deallocation
                 std::mem::forget(public_keys_bytes);
@@ -402,14 +438,17 @@ fn PublicKeysBytes2dVectorFromPointer(public_keys_raw: *mut DynArray, public_key
         }
         std::mem::forget(ser_pk);
     }
-    
+
     // prevents deallocation
     std::mem::forget(public_keys_bytes);
-    
+
     return Ok(public_keys);
 }
 
-fn SignaturesBytes2dVectorFromPointer(signatures_raw: *mut DynArray, num_of_signatures: size_t) -> Result<Vec<Signature>, bool> {
+fn SignaturesBytes2dVectorFromPointer(
+    signatures_raw: *mut DynArray,
+    num_of_signatures: size_t,
+) -> Result<Vec<Signature>, bool> {
     // getting public keys
     let signatures_bytes = unsafe { std::slice::from_raw_parts(signatures_raw, num_of_signatures) };
 
@@ -425,19 +464,18 @@ fn SignaturesBytes2dVectorFromPointer(signatures_raw: *mut DynArray, num_of_sign
         match signature_result {
             Ok(signature) => {
                 signatures.push(signature);
-            },
+            }
             Err(e) => {
                 // prevents deallocation
                 std::mem::forget(signatures_bytes);
                 return Err(true);
             }
         }
-
     }
-    
+
     // prevents deallocation
     std::mem::forget(signatures_bytes);
-    
+
     return Ok(signatures);
 }
 
@@ -446,7 +484,7 @@ pub extern "C" fn FreePrivateKey(ptr: *mut u8) {
     if ptr.is_null() {
         return;
     }
-    
+
     PrivateKeyBytesFromPointer(ptr);
 }
 
@@ -460,20 +498,22 @@ pub extern "C" fn GeneratePrivateKey() -> *mut u8 {
     let mut rng = rand::thread_rng();
     let r = Scalar::random(&mut rng);
 
-    let ser= SerializePrivateKey(&r);
-    
+    let ser = SerializePrivateKey(&r);
+
     // println!("priv key rust:{:?}", ser);
-    
+
     let ser_vec = ser.to_vec();
 
     return Box::into_raw(ser_vec.into_boxed_slice()) as *mut u8;
 }
 
 #[no_mangle]
-pub extern "C" fn GeneratePublicKeyFromPrivateKey(private_key_ptr: *mut u8, error_occured: *mut libc::c_char) -> DynArray {
+pub extern "C" fn GeneratePublicKeyFromPrivateKey(
+    private_key_ptr: *mut u8,
+    error_occured: *mut libc::c_char,
+) -> DynArray {
     let private_key = PrivateKeyBytesFromPointer(private_key_ptr);
-    
-    
+
     let r_result = DeserializePrivateKey(&private_key);
 
     let deallo_prevent = || {
@@ -492,29 +532,29 @@ pub extern "C" fn GeneratePublicKeyFromPrivateKey(private_key_ptr: *mut u8, erro
         return EmptyDynArray();
     }
 
-    let G = util::hash_to_point("G"); 
-    
-    let public_key: RistrettoPoint = r*G;
+    let G = util::hash_to_point("G");
+
+    let public_key: RistrettoPoint = r * G;
     // bad code. should check if good before unwraaping
     let ser_result = SerializePublicKey(&public_key);
     let ser: Box<[u8]>;
     match ser_result {
         Ok(bytes) => {
             ser = bytes.into_boxed_slice();
-        },
+        }
         Err(e) => {
             deallo_prevent();
             unsafe {
                 *error_occured = 1;
             }
-            
+
             return EmptyDynArray();
         }
     }
-    
+
     // println!("pub key rust: {:?}", ser);
 
-    let arr = DynArray{
+    let arr = DynArray {
         length: ser.len(),
         array: Box::into_raw(ser) as *mut u8,
     };
@@ -525,23 +565,31 @@ pub extern "C" fn GeneratePublicKeyFromPrivateKey(private_key_ptr: *mut u8, erro
 }
 
 #[no_mangle]
-pub extern "C" fn RSSign(private_key_ptr: *mut u8, message_raw: *mut u8, message_size: libc::size_t, public_keys_raw: *mut DynArray, public_keys_size: size_t, error_occured: *mut libc::c_char) -> DynArray {
+pub extern "C" fn RSSign(
+    private_key_ptr: *mut u8,
+    message_raw: *mut u8,
+    message_size: libc::size_t,
+    public_keys_raw: *mut DynArray,
+    public_keys_size: size_t,
+    error_occured: *mut libc::c_char,
+) -> DynArray {
     // println!("Inside of sign");
     // getting private keys
-    let private_key_bytes: Box<[u8; PRIVATE_KEY_SIZE]> = PrivateKeyBytesFromPointer(private_key_ptr);
-    
+    let private_key_bytes: Box<[u8; PRIVATE_KEY_SIZE]> =
+        PrivateKeyBytesFromPointer(private_key_ptr);
+
     let private_key_option = DeserializePrivateKey(&private_key_bytes);
     let private_key: Scalar;
     match private_key_option {
         Some(s) => {
             private_key = s;
-        },
+        }
         None => {
             unsafe {
                 *error_occured = 1;
             }
             return EmptyDynArray();
-        },
+        }
     }
 
     // getting m
@@ -552,13 +600,13 @@ pub extern "C" fn RSSign(private_key_ptr: *mut u8, message_raw: *mut u8, message
     //     Box::into_raw(private_key_bytes);
     //     Box::into_raw(m);
     // };
-    
+
     let public_keys_result = PublicKeysBytes2dVectorFromPointer(public_keys_raw, public_keys_size);
     let public_keys: Vec<RistrettoPoint>;
     match public_keys_result {
         Ok(r) => {
             public_keys = r;
-        },
+        }
         Err(e) => {
             Box::into_raw(private_key_bytes);
             Box::into_raw(m);
@@ -568,14 +616,13 @@ pub extern "C" fn RSSign(private_key_ptr: *mut u8, message_raw: *mut u8, message
             return EmptyDynArray();
         }
     }
-    
+
     // calling function
     let res = Sign(&private_key, &m, &public_keys);
-    
+
     // function end
     Box::into_raw(private_key_bytes);
     Box::into_raw(m);
-
 
     let signature_result = SerializeSignature(&res);
     // println!("After serialize signature");
@@ -587,34 +634,42 @@ pub extern "C" fn RSSign(private_key_ptr: *mut u8, message_raw: *mut u8, message
             // println!("Returning sig");
             let p = Box::into_raw(sigRes) as *mut u8;
             // println!("P: {:?}", p);
-            return DynArray{
+            return DynArray {
                 array: p,
                 length: sigLen,
             };
-        },
-        Err(e) => {
-            unsafe {
-                *error_occured = 1;
-            }
         }
+        Err(e) => unsafe {
+            *error_occured = 1;
+        },
     }
     // println!("Returining empty");
-    return DynArray{array: std::ptr::null_mut(), length: 0};
+    return DynArray {
+        array: std::ptr::null_mut(),
+        length: 0,
+    };
 }
 
 #[no_mangle]
-pub extern "C" fn RSVerify(signature_raw: DynArray, message_raw: *mut u8, message_size: libc::size_t, public_keys_raw: *mut DynArray, public_keys_size: size_t, error_occured: *mut libc::c_char) -> libc::c_char {
+pub extern "C" fn RSVerify(
+    signature_raw: DynArray,
+    message_raw: *mut u8,
+    message_size: libc::size_t,
+    public_keys_raw: *mut DynArray,
+    public_keys_size: size_t,
+    error_occured: *mut libc::c_char,
+) -> libc::c_char {
     // println!("Inside of verify");
     // getting signature
     let signature_bytes = BytesFromPointer(signature_raw.array, signature_raw.length);
-    
+
     let signature_result = DeserializeSignature(&signature_bytes);
 
     let signature: Signature;
     match signature_result {
         Ok(s) => {
             signature = s;
-        },
+        }
         Err(e) => {
             Box::into_raw(signature_bytes);
             unsafe {
@@ -623,16 +678,16 @@ pub extern "C" fn RSVerify(signature_raw: DynArray, message_raw: *mut u8, messag
             return 0;
         }
     }
-    
+
     // getting m
     let m = BytesFromPointer(message_raw, message_size);
-    
+
     let public_keys_result = PublicKeysBytes2dVectorFromPointer(public_keys_raw, public_keys_size);
     let public_keys: Vec<RistrettoPoint>;
     match public_keys_result {
         Ok(r) => {
             public_keys = r;
-        },
+        }
         Err(e) => {
             Box::into_raw(signature_bytes);
             Box::into_raw(m);
@@ -642,10 +697,10 @@ pub extern "C" fn RSVerify(signature_raw: DynArray, message_raw: *mut u8, messag
             return 0;
         }
     }
-    
+
     // calling function
     let res = Verify(&signature, &m, &public_keys);
-    
+
     // function end
     Box::into_raw(signature_bytes);
     Box::into_raw(m);
@@ -655,11 +710,16 @@ pub extern "C" fn RSVerify(signature_raw: DynArray, message_raw: *mut u8, messag
 }
 
 #[no_mangle]
-pub extern "C" fn HasLinkInList(signature_raw: DynArray, signatures_raw: *mut DynArray, num_of_signatures: size_t, error_occured: *mut libc::c_char) -> libc::c_char {
+pub extern "C" fn HasLinkInList(
+    signature_raw: DynArray,
+    signatures_raw: *mut DynArray,
+    num_of_signatures: size_t,
+    error_occured: *mut libc::c_char,
+) -> libc::c_char {
     // getting signature
     let signature_bytes = BytesFromPointer(signature_raw.array, signature_raw.length);
     let signature_result = DeserializeSignature(&signature_bytes);
-    
+
     // preventing deallocation
     Box::into_raw(signature_bytes);
 
@@ -667,7 +727,7 @@ pub extern "C" fn HasLinkInList(signature_raw: DynArray, signatures_raw: *mut Dy
     match signature_result {
         Ok(s) => {
             signature = s;
-        },
+        }
         Err(e) => {
             unsafe {
                 *error_occured = 1;
@@ -675,13 +735,14 @@ pub extern "C" fn HasLinkInList(signature_raw: DynArray, signatures_raw: *mut Dy
             return 0;
         }
     }
-    
-    let signatures_array_reult = SignaturesBytes2dVectorFromPointer(signatures_raw, num_of_signatures);
+
+    let signatures_array_reult =
+        SignaturesBytes2dVectorFromPointer(signatures_raw, num_of_signatures);
     let signatures_array: Vec<Signature>;
     match signatures_array_reult {
         Ok(s) => {
             signatures_array = s;
-        },
+        }
         Err(_e) => {
             unsafe {
                 *error_occured = 1;
@@ -695,16 +756,65 @@ pub extern "C" fn HasLinkInList(signature_raw: DynArray, signatures_raw: *mut Dy
             return 1;
         }
     }
-    
+
     return 0;
 }
 
+#[no_mangle]
+pub extern "C" fn RSLink(
+    signature_raw1: DynArray,
+    signature_raw2: DynArray,
+    error_occured: *mut libc::c_char,
+) -> libc::c_char {
+    // getting signature
+    let signature_bytes1 = BytesFromPointer(signature_raw1.array, signature_raw1.length);
+    let signature_result1 = DeserializeSignature(&signature_bytes1);
+
+    let signature_bytes2 = BytesFromPointer(signature_raw2.array, signature_raw2.length);
+    let signature_result2 = DeserializeSignature(&signature_bytes2);
+
+    // preventing deallocation
+    Box::into_raw(signature_bytes1);
+    Box::into_raw(signature_bytes2);
+
+    let signature1: Signature;
+    match signature_result1 {
+        Ok(s) => {
+            signature1 = s;
+        }
+        Err(e) => {
+            unsafe {
+                *error_occured = 1;
+            }
+            return 0;
+        }
+    }
+
+    let signature2: Signature;
+    match signature_result2 {
+        Ok(s) => {
+            signature2 = s;
+        }
+        Err(e) => {
+            unsafe {
+                *error_occured = 1;
+            }
+            return 0;
+        }
+    }
+
+    if Link(&signature1, &signature2) {
+        return 1;
+    }
+
+    return 0;
+}
 pub fn Sign(x: &Scalar, M: &[u8], R: &[RistrettoPoint]) -> Signature {
-    let G = util::hash_to_point("G"); 
+    let G = util::hash_to_point("G");
 
     let mut l: usize = 0;
     for (i, element) in R.iter().enumerate() {
-        if  *element == x*G {
+        if *element == x * G {
             l = i;
         }
     }
@@ -713,21 +823,21 @@ pub fn Sign(x: &Scalar, M: &[u8], R: &[RistrettoPoint]) -> Signature {
     let mut base = 1;
     let mut m = 0;
     while base < size {
-        base = base*2;
-        m = m+1;
+        base = base * 2;
+        m = m + 1;
     }
 
     return base_prove(R, &l, x, &m, M);
 }
 
-pub fn Verify(sgn: &Signature, M: &[u8], R: &[RistrettoPoint]) ->  Result<(), Errors> {
+pub fn Verify(sgn: &Signature, M: &[u8], R: &[RistrettoPoint]) -> Result<(), Errors> {
     let size = R.len();
     let mut base = 1;
     let mut m = 0;
 
     while base < size {
-        base = base*2;
-        m = m+1;
+        base = base * 2;
+        m = m + 1;
     }
 
     return base_verify(R, sgn, &m, M);
@@ -740,18 +850,21 @@ pub fn Link(sgn_a: &Signature, sgn_b: &Signature) -> bool {
 #[cfg(test)]
 mod triptych_test {
 
-    use curve25519_dalek::digest::generic_array::typenum::assert_type;
-    use curve25519_dalek::ristretto::{RistrettoPoint};
-    use curve25519_dalek::scalar::Scalar;
-    use curve25519_dalek::traits::Identity;
     use crate::signature::triptych;
     use crate::util;
+    use curve25519_dalek::digest::generic_array::typenum::assert_type;
+    use curve25519_dalek::ristretto::RistrettoPoint;
+    use curve25519_dalek::scalar::Scalar;
+    use curve25519_dalek::traits::Identity;
 
-    use super::{GeneratePrivateKey, FreeVector, GeneratePublicKeyFromPrivateKey, FreePublicKey, FreePrivateKey};
-    
+    use super::{
+        FreePrivateKey, FreePublicKey, FreeVector, GeneratePrivateKey,
+        GeneratePublicKeyFromPrivateKey,
+    };
+
     #[test]
-    pub fn test_base_signature(){
-        let G = util::hash_to_point("G"); 
+    pub fn test_base_signature() {
+        let G = util::hash_to_point("G");
         let m: usize = 4;
         let l: usize = 12;
         let len_M = 16;
@@ -762,7 +875,7 @@ mod triptych_test {
         let mut r: Scalar = Scalar::one();
         for i in 0..len_M {
             let sk = Scalar::random(&mut rng);
-            M[i] = sk*G;
+            M[i] = sk * G;
 
             if i == l {
                 r = sk;
@@ -774,11 +887,10 @@ mod triptych_test {
         let result = triptych::base_verify(&M, &sgn, &m, "demo");
 
         assert!(result.is_ok());
-
     }
 
     #[test]
-    pub fn test_signature(){
+    pub fn test_signature() {
         let size = 64;
         let mut R: Vec<RistrettoPoint> = vec![RistrettoPoint::identity(); size];
         let mut x: Scalar = Scalar::one();
@@ -799,31 +911,29 @@ mod triptych_test {
         let result = triptych::Verify(&sgn, &M, &R);
 
         assert!(result.is_ok());
-
     }
 
     #[test]
-    pub fn test_serialize_scalar(){
+    pub fn test_serialize_scalar() {
         let (sc, _) = triptych::KeyGen();
 
         let encoded = triptych::SerializePrivateKey(sc);
-        
-        let decoded: Option<Scalar> = triptych::DeserializePrivateKey(encoded);
-        
-        assert!(!decoded.is_none());
-        
-        let sc_decoded = decoded.unwrap();
-        
-        assert_eq!(sc, sc_decoded);
 
+        let decoded: Option<Scalar> = triptych::DeserializePrivateKey(encoded);
+
+        assert!(!decoded.is_none());
+
+        let sc_decoded = decoded.unwrap();
+
+        assert_eq!(sc, sc_decoded);
     }
 
     #[test]
-    pub fn test_serialize_rissoto_point(){
+    pub fn test_serialize_rissoto_point() {
         let (_, rp) = triptych::KeyGen();
-        
+
         let encoded = triptych::SerializePublicKey(&rp).unwrap();
-        
+
         let decoded = bincode::deserialize(&encoded[..]).unwrap();
         assert_eq!(rp, decoded);
     }
@@ -831,12 +941,11 @@ mod triptych_test {
     #[test]
     pub fn test_wrapper_free() {
         let priv_key = GeneratePrivateKey();
-        
-        let mut pub_key_len:libc::size_t = 0;
+
+        let mut pub_key_len: libc::size_t = 0;
         let pub_key = GeneratePublicKeyFromPrivateKey(priv_key, &mut pub_key_len);
-        
+
         FreePublicKey(pub_key, pub_key_len);
         FreePrivateKey(priv_key);
     }
-
 }
