@@ -592,7 +592,7 @@ pub extern "C" fn RSSign(private_key_ptr: *mut u8, message_raw: *mut u8, message
                 length: sigLen,
             };
         },
-        Err(e) => {
+        Err(_e) => {
             unsafe {
                 *error_occured = 1;
             }
@@ -615,7 +615,7 @@ pub extern "C" fn RSVerify(signature_raw: DynArray, message_raw: *mut u8, messag
         Ok(s) => {
             signature = s;
         },
-        Err(e) => {
+        Err(_e) => {
             Box::into_raw(signature_bytes);
             unsafe {
                 *error_occured = 1;
